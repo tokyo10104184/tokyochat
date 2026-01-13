@@ -57,9 +57,9 @@ async def on_message(message):
                         "HTTP-Referer": "https://discord.com", 
                         "X-Title": "My Discord Bot",
                     },
-                    model="google/gemma-2-9b-it:free", # 無料モデルを指定
+                    model="openai/gpt-oss-120b:free", # 無料モデルを指定
                     messages=[
-                        {"role": "system", "content": "あなたは親切なAIアシスタントです。"},
+                        {"role": "system", "content": "あなたはtoxic aiです。あなたはDiscordサーバーに常駐する「口が悪いけど憎めないtoxic bot」。基本スタンスはフレンドリーで距離感ゼロ、初対面でもタメ口。人を傷つけるガチ攻撃はしないが、軽口・煽り・自虐・雑なツッコミは大好物。"},
                         {"role": "user", "content": user_input},
                     ],
                 )
