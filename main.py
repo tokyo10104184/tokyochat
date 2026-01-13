@@ -4,16 +4,11 @@ from discord.ext import commands
 from openai import OpenAI
 from flask import Flask
 from threading import Thread
+from collections import deque
 
 # --- 設定読み込み ---
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-
-# トークンがない場合に警告を出して終了させる（デバッグ用）
-if not DISCORD_TOKEN:
-    print("エラー: DISCORD_TOKEN 環境変数が設定されていません。")
-if not OPENROUTER_API_KEY:
-    print("警告: OPENROUTER_API_KEY 環境変数が設定されていません。")
 
 # --- OpenRouter 設定 ---
 client = OpenAI(
@@ -31,7 +26,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot is Alive!"
+    return "Koyeb Bot is Alive!"
 
 def run():
     app.run(host='0.0.0.0', port=8000)
@@ -40,69 +35,100 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
+# --- 状態管理用変数 ---
+# チャンネルごとの会話履歴 {channel_id: [messages...]}
+conversation_history = {}
+# 会話履歴の最大保持数（増やしすぎるとエラーになる可能性があります）
+MAX_HISTORY = 10 
+
+# 自動応答モードがオンになっているチャンネルIDのリスト
+active_channels = set()
+
 # --- Botの動作 ---
 @bot.event
 async def on_ready():
-    print(f'ログインしました: {bot.user}')
-    print(f'現在のIntents設定: message_content={intents.message_content}')
+    print(f'Logged in as {bot.user}')
+
+# --- !channel コマンド ---
+@bot.command()
+async def channel(ctx):
+    """現在のチャンネルでの自動応答モードを切り替えます"""
+    channel_id = ctx.channel.id
+    if channel_id in active_channels:
+        active_channels.remove(channel_id)
+        # モードをオフにした際、履歴もリセットしたい場合は以下をコメントアウト解除
+        # if channel_id in conversation_history:
+        #     del conversation_history[channel_id]
+        await ctx.send("🔇 このチャンネルでの自動応答を**オフ**にしました。（メンション時のみ反応します）")
+    else:
+        active_channels.add(channel_id)
+        await ctx.send("🔊 このチャンネルでの自動応答を**オン**にしました。（全てのメッセージに反応します）")
 
 @bot.event
 async def on_message(message):
-    # 自分自身のメッセージは無視
+    # Bot自身のメッセージは無視
     if message.author == bot.user:
         return
 
-    # デバッグ: メッセージを受信したことをログに出す
-    # (これがコンソールに出ない場合、Developer PortalのIntent設定が原因です)
-    print(f"メッセージ受信: {message.author}: {message.content}")
+    # コマンド処理 (!channel など) を優先
+    await bot.process_commands(message)
 
-    # Botへのメンションで反応
-    if bot.user in message.mentions:
-        print("Botへのメンションを検知しました。AI生成を開始します...")
+    # 反応する条件: 
+    # 1. Botへのメンションがある
+    # OR
+    # 2. 自動応答モードのチャンネルである (かつコマンド開始文字ではない)
+    is_mentioned = bot.user in message.mentions
+    is_active_channel = message.channel.id in active_channels
+    is_command = message.content.startswith(bot.command_prefix)
+
+    if (is_mentioned or (is_active_channel and not is_command)):
         async with message.channel.typing():
             try:
+                # ユーザー入力を整形 (メンション部分を削除)
                 user_input = message.content.replace(f'<@{bot.user.id}>', '').strip()
-                
-                # 入力が空の場合の対策
                 if not user_input:
-                    await message.channel.send("何か話しかけてください！")
-                    return
+                    return # 空メッセージなら無視
 
-                # モデルを比較的安定している無料モデルに変更 (必要に応じて変更してください)
-                # 例: google/gemini-2.0-flash-exp:free, meta-llama/llama-3-8b-instruct:free など
+                channel_id = message.channel.id
+
+                # 履歴がなければ初期化
+                if channel_id not in conversation_history:
+                    conversation_history[channel_id] = [
+                        {"role": "system", "content": "あなたは役に立つAIアシスタントです。"}
+                    ]
+
+                # ユーザーのメッセージを履歴に追加
+                conversation_history[channel_id].append({"role": "user", "content": user_input})
+
+                # 履歴制限 (システムプロンプト + 最新のN件のみを残す)
+                # systemプロンプト(index 0)は維持し、それ以外をスライスして結合
+                if len(conversation_history[channel_id]) > MAX_HISTORY:
+                    system_msg = conversation_history[channel_id][0]
+                    recent_msgs = conversation_history[channel_id][-(MAX_HISTORY-1):]
+                    conversation_history[channel_id] = [system_msg] + recent_msgs
+
+                # APIリクエスト (履歴全体を送信)
                 completion = client.chat.completions.create(
                     extra_headers={
                         "HTTP-Referer": "https://discord.com", 
-                        "X-Title": "Discord Bot",
+                        "X-Title": "My Discord Bot",
                     },
-                    model="openai/gpt-oss-120b:free", 
-                    messages=[
-                        {"role": "system", "content": "あなたは役に立つAIアシスタントです。"},
-                        {"role": "user", "content": user_input},
-                    ],
+                    model="openai/gpt-oss-120b:free",
+                    messages=conversation_history[channel_id], # ここで履歴を渡す
                 )
                 
                 response = completion.choices[0].message.content
                 
-                # エラーではないが中身が空の場合
-                if not response:
-                    response = "AIからの応答がありませんでした。"
+                # AIの応答を履歴に追加
+                conversation_history[channel_id].append({"role": "assistant", "content": response})
 
                 await message.channel.send(response)
-                print("返信完了")
 
             except Exception as e:
-                error_msg = f"エラーが発生しました: {e}"
-                print(error_msg)
-                await message.channel.send(error_msg)
-
-    # コマンド処理（もし今後追加する場合に必要）
-    await bot.process_commands(message)
+                # エラー時は履歴に追加しないほうが安全かもしれません
+                await message.channel.send(f"エラーが発生しました: {e}")
+                print(f"Error: {e}")
 
 # --- 実行 ---
 keep_alive()
-
-if DISCORD_TOKEN:
-    bot.run(DISCORD_TOKEN)
-else:
-    print("Botを起動できませんでした。DISCORD_TOKENを確認してください。")
+bot.run(DISCORD_TOKEN)
