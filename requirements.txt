@@ -1,0 +1,5 @@
+discord.py
+openai
+flask
+python-dotenv
+gunicorn
